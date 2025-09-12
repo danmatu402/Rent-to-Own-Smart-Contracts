@@ -8,6 +8,8 @@
 (define-constant ERR_ALREADY_OWNED (err u106))
 (define-constant ERR_INSUFFICIENT_PAYMENT (err u107))
 
+(define-constant ERR_BUYOUT_CALCULATION (err u108))
+
 (define-map assets
   { asset-id: uint }
   {
@@ -184,6 +186,49 @@
       ownership-percentage: (calculate-ownership-percentage asset-id),
       is-complete: (>= (get payments-made asset-data) (get total-payments asset-data))
     })
+    ERR_ASSET_NOT_FOUND
+  )
+)
+
+
+(define-read-only (get-buyout-amount (asset-id uint))
+  (match (map-get? assets { asset-id: asset-id })
+    asset-data
+    (let ((payments-remaining (- (get total-payments asset-data) (get payments-made asset-data))))
+      (ok (* payments-remaining (get payment-amount asset-data))))
+    ERR_ASSET_NOT_FOUND
+  )
+)
+
+(define-public (early-buyout (asset-id uint))
+  (match (map-get? assets { asset-id: asset-id })
+    asset-data
+    (let ((tenant (unwrap! (get tenant asset-data) ERR_NOT_ENROLLED))
+          (payments-due (- (get total-payments asset-data) (get payments-made asset-data)))
+          (buyout-amount (* payments-due (get payment-amount asset-data))))
+      (asserts! (is-eq tx-sender tenant) ERR_UNAUTHORIZED)
+      (asserts! (get active asset-data) ERR_ASSET_NOT_FOUND)
+      (asserts! (> payments-due u0) ERR_ALREADY_OWNED)
+      (asserts! (> buyout-amount u0) ERR_BUYOUT_CALCULATION)
+      
+      (try! (stx-transfer? buyout-amount tx-sender (get owner asset-data)))
+      
+      (map-set assets
+        { asset-id: asset-id }
+        (merge asset-data {
+          payments-made: (get total-payments asset-data),
+          last-payment-block: stacks-block-height,
+          owner: tx-sender,
+          tenant: none,
+          active: false
+        })
+      )
+      (ok { 
+        transferred: true, 
+        payments-remaining: u0,
+        buyout-amount: buyout-amount 
+      })
+    )
     ERR_ASSET_NOT_FOUND
   )
 )
