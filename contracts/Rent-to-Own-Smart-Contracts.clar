@@ -232,3 +232,83 @@
     ERR_ASSET_NOT_FOUND
   )
 )
+
+
+(define-map payment-history
+  { asset-id: uint, payment-index: uint }
+  {
+    payer: principal,
+    amount: uint,
+    block-height: uint,
+    timestamp-block: uint,
+    payment-number: uint,
+    remaining-payments: uint
+  }
+)
+
+(define-map asset-payment-count
+  { asset-id: uint }
+  { count: uint }
+)
+
+(define-private (record-payment-history 
+  (asset-id uint) 
+  (payer principal) 
+  (amount uint) 
+  (payment-num uint) 
+  (remaining uint))
+  (let ((current-count (default-to u0 
+          (get count (map-get? asset-payment-count { asset-id: asset-id })))))
+    (map-set payment-history
+      { asset-id: asset-id, payment-index: current-count }
+      {
+        payer: payer,
+        amount: amount,
+        block-height: stacks-block-height,
+        timestamp-block: stacks-block-height,
+        payment-number: payment-num,
+        remaining-payments: remaining
+      }
+    )
+    (map-set asset-payment-count
+      { asset-id: asset-id }
+      { count: (+ current-count u1) }
+    )
+    true
+  )
+)
+
+(define-read-only (get-payment-record (asset-id uint) (payment-index uint))
+  (map-get? payment-history { asset-id: asset-id, payment-index: payment-index })
+)
+
+(define-read-only (get-total-payment-records (asset-id uint))
+  (default-to u0 (get count (map-get? asset-payment-count { asset-id: asset-id })))
+)
+
+(define-read-only (get-payment-history-range (asset-id uint) (start-index uint) (end-index uint))
+  (ok {
+    total-records: (get-total-payment-records asset-id),
+    range-start: start-index,
+    range-end: end-index
+  })
+)
+
+(define-read-only (get-latest-payment (asset-id uint))
+  (let ((total-records (get-total-payment-records asset-id)))
+    (if (> total-records u0)
+      (map-get? payment-history { asset-id: asset-id, payment-index: (- total-records u1) })
+      none
+    )
+  )
+)
+
+(define-read-only (verify-payment-sequence (asset-id uint))
+  (let ((total-records (get-total-payment-records asset-id)))
+    (ok {
+      is-valid: (>= total-records u0),
+      total-payments-recorded: total-records,
+      last-verified-block: stacks-block-height
+    })
+  )
+)
