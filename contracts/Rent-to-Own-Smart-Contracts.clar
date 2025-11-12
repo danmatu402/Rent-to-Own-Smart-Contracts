@@ -10,6 +10,13 @@
 
 (define-constant ERR_BUYOUT_CALCULATION (err u108))
 
+(define-constant GRACE_PERIOD_BLOCKS u72)
+(define-constant PENALTY_TIER_1_BLOCKS u144)
+(define-constant PENALTY_TIER_2_BLOCKS u288)
+(define-constant PENALTY_RATE_TIER_1 u5)
+(define-constant PENALTY_RATE_TIER_2 u10)
+(define-constant PENALTY_RATE_TIER_3 u20)
+
 (define-map assets
   { asset-id: uint }
   {
@@ -311,4 +318,78 @@
       last-verified-block: stacks-block-height
     })
   )
+)
+
+
+(define-map payment-penalties
+  { asset-id: uint, payment-number: uint }
+  { penalty-amount: uint, blocks-late: uint, applied-rate: uint }
+)
+
+(define-read-only (calculate-late-penalty (asset-id uint))
+  (match (map-get? assets { asset-id: asset-id })
+    asset-data
+    (let (
+      (blocks-late (- stacks-block-height (+ (get last-payment-block asset-data) (get payment-interval asset-data))))
+      (base-amount (get payment-amount asset-data))
+    )
+      (if (<= blocks-late GRACE_PERIOD_BLOCKS)
+        (ok { penalty: u0, blocks-late: blocks-late, rate: u0 })
+        (if (<= blocks-late PENALTY_TIER_1_BLOCKS)
+          (ok { penalty: (/ (* base-amount PENALTY_RATE_TIER_1) u100), blocks-late: blocks-late, rate: PENALTY_RATE_TIER_1 })
+          (if (<= blocks-late PENALTY_TIER_2_BLOCKS)
+            (ok { penalty: (/ (* base-amount PENALTY_RATE_TIER_2) u100), blocks-late: blocks-late, rate: PENALTY_RATE_TIER_2 })
+            (ok { penalty: (/ (* base-amount PENALTY_RATE_TIER_3) u100), blocks-late: blocks-late, rate: PENALTY_RATE_TIER_3 })
+          )
+        )
+      )
+    )
+    ERR_ASSET_NOT_FOUND
+  )
+)
+
+(define-public (make-payment-with-penalty (asset-id uint))
+  (match (map-get? assets { asset-id: asset-id })
+    asset-data
+    (let (
+      (tenant (unwrap! (get tenant asset-data) ERR_NOT_ENROLLED))
+      (penalty-info (unwrap! (calculate-late-penalty asset-id) ERR_PAYMENT_AMOUNT))
+      (penalty-amount (get penalty penalty-info))
+      (total-payment (+ (get payment-amount asset-data) penalty-amount))
+    )
+      (asserts! (is-eq tx-sender tenant) ERR_UNAUTHORIZED)
+      (asserts! (get active asset-data) ERR_ASSET_NOT_FOUND)
+      (asserts! (< (get payments-made asset-data) (get total-payments asset-data)) ERR_ALREADY_OWNED)
+      
+      (try! (stx-transfer? total-payment tx-sender (get owner asset-data)))
+      
+      (let (
+        (new-payments (+ (get payments-made asset-data) u1))
+        (is-final-payment (>= new-payments (get total-payments asset-data)))
+      )
+        (map-set payment-penalties
+          { asset-id: asset-id, payment-number: new-payments }
+          { penalty-amount: penalty-amount, blocks-late: (get blocks-late penalty-info), applied-rate: (get rate penalty-info) }
+        )
+        (map-set assets
+          { asset-id: asset-id }
+          (merge asset-data 
+            {
+              payments-made: new-payments,
+              last-payment-block: stacks-block-height,
+              owner: (if is-final-payment tx-sender (get owner asset-data)),
+              tenant: (if is-final-payment none (some tx-sender)),
+              active: (not is-final-payment)
+            }
+          )
+        )
+        (ok { penalty-charged: penalty-amount, total-paid: total-payment, payments-remaining: (- (get total-payments asset-data) new-payments) })
+      )
+    )
+    ERR_ASSET_NOT_FOUND
+  )
+)
+
+(define-read-only (get-penalty-record (asset-id uint) (payment-number uint))
+  (map-get? payment-penalties { asset-id: asset-id, payment-number: payment-number })
 )
